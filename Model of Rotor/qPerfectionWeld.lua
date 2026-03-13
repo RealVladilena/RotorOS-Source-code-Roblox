@@ -1,240 +1,208 @@
 -- ============================================================
--- PERFECTION WELD
+-- PERFECTION WELD 
 -- ============================================================
 local NEVER_BREAK_JOINTS = false
 
-local Hub = script.Parent
+local Hub          = script.Parent
 local BladesFolder = Hub:FindFirstChild("Blades")
 
-local function CallOnChildren(Instance, FunctionToCall)
-	FunctionToCall(Instance)
-	for _, Child in next, Instance:GetChildren() do
-		CallOnChildren(Child, FunctionToCall)
+-- Cache des modèles de pales pour éviter la recherche répétée
+local bladeModels = {}
+if BladesFolder then
+	for i = 1, 3 do
+		bladeModels[i] = BladesFolder:FindFirstChild("blade" .. i)
 	end
 end
 
-local function GetNearestParent(Instance, ClassName)
-	local Ancestor = Instance
+-- Itération récursive sur les descendants
+local function ForEachDescendant(root, fn)
+	fn(root)
+	for _, child in next, root:GetChildren() do
+		ForEachDescendant(child, fn)
+	end
+end
+
+local function GetNearestParent(inst, className)
+	local ancestor = inst
 	repeat
-		Ancestor = Ancestor.Parent
-		if Ancestor == nil then
-			return nil
-		end
-	until Ancestor:IsA(ClassName)
-	return Ancestor
+		ancestor = ancestor.Parent
+		if ancestor == nil then return nil end
+	until ancestor:IsA(className)
+	return ancestor
 end
 
-local function GetBricks(StartInstance)
-	local List = {}
-	CallOnChildren(StartInstance, function(Item)
-		if not Item:IsA("BasePart") then return end
-		if Item:FindFirstChild("NoPerfWeld") then return end
-
-		-- On empêche la soudure des pièces des pales par PerfectionWeld
-		local inBladeModel = false
-		for i = 1, 3 do
-			local bModel = BladesFolder and BladesFolder:FindFirstChild("blade" .. i)
-			if bModel and Item:IsDescendantOf(bModel) then
-				inBladeModel = true
-				break
-			end
+-- Retourne les BaseParts soudables (hors pales, hors NoPerfWeld)
+local function GetBricks(startInst)
+	local list = {}
+	ForEachDescendant(startInst, function(item)
+		if not item:IsA("BasePart") then return end
+		if item:FindFirstChild("NoPerfWeld") then return end
+		for _, bm in ipairs(bladeModels) do
+			if bm and item:IsDescendantOf(bm) then return end
 		end
-
-		if not inBladeModel then
-			List[#List+1] = Item
-		end
+		list[#list + 1] = item
 	end)
-	return List
+	return list
 end
 
-local function Modify(Instance, Values)
-	assert(type(Values) == "table", "Values is not a table")
-	for Index, Value in next, Values do
-		if type(Index) == "number" then
-			Value.Parent = Instance
-		else
-			Instance[Index] = Value
-		end
+local function Modify(inst, values)
+	for k, v in next, values do
+		if type(k) == "number" then v.Parent = inst
+		else inst[k] = v end
 	end
-	return Instance
+	return inst
 end
 
-local function Make(ClassType, Properties)
-	return Modify(Instance.new(ClassType), Properties)
+local function Make(classType, props)
+	return Modify(Instance.new(classType), props)
 end
 
-local Surfaces = {"TopSurface", "BottomSurface", "LeftSurface", "RightSurface", "FrontSurface", "BackSurface"}
-local HingSurfaces = {"Hinge", "Motor", "SteppingMotor"}
+local SURFACES      = {"TopSurface","BottomSurface","LeftSurface","RightSurface","FrontSurface","BackSurface"}
+local HINGE_NAMES   = {Hinge=true, Motor=true, SteppingMotor=true}
 
-local function HasWheelJoint(Part)
-	for _, SurfaceName in pairs(Surfaces) do
-		for _, HingSurfaceName in pairs(HingSurfaces) do
-			if Part[SurfaceName].Name == HingSurfaceName then
-				return true
-			end
-		end
+local function HasWheelJoint(part)
+	for _, s in ipairs(SURFACES) do
+		if HINGE_NAMES[part[s].Name] then return true end
 	end
 	return false
 end
 
-local function ShouldBreakJoints(Part)
-	if NEVER_BREAK_JOINTS then return false end
-	if Part:FindFirstChild("NoPerfWeld") then return false end
-	if HasWheelJoint(Part) then return false end
-	local Connected = Part:GetConnectedParts()
-	if #Connected == 1 then return false end
-	for _, Item in pairs(Connected) do
-		if HasWheelJoint(Item) then
-			return false
-		elseif not Item:IsDescendantOf(script.Parent) then
-			return false
-		end
+local function ShouldBreakJoints(part)
+	if NEVER_BREAK_JOINTS or part:FindFirstChild("NoPerfWeld") or HasWheelJoint(part) then return false end
+	local connected = part:GetConnectedParts()
+	if #connected == 1 then return false end
+	for _, item in ipairs(connected) do
+		if HasWheelJoint(item) or not item:IsDescendantOf(script.Parent) then return false end
 	end
 	return true
 end
 
-local function WeldTogether(Part0, Part1, JointType, WeldParent)
-	JointType = JointType or "Weld"
-	local RelativeValue = Part1:FindFirstChild("qRelativeCFrameWeldValue")
-	local NewWeld = Part1:FindFirstChild("qCFrameWeldThingy") or Instance.new(JointType)
-	Modify(NewWeld, {
+local function WeldTogether(part0, part1)
+	local relVal   = part1:FindFirstChild("qRelativeCFrameWeldValue")
+	local newWeld  = part1:FindFirstChild("qCFrameWeldThingy") or Instance.new("Weld")
+	Modify(newWeld, {
 		Name   = "qCFrameWeldThingy";
-		Part0  = Part0;
-		Part1  = Part1;
+		Part0  = part0;
+		Part1  = part1;
 		C0     = CFrame.new();
-		C1     = RelativeValue and RelativeValue.Value or Part1.CFrame:toObjectSpace(Part0.CFrame);
-		Parent = Part1;
+		C1     = relVal and relVal.Value or part1.CFrame:ToObjectSpace(part0.CFrame);
+		Parent = part1;
 	})
-	if not RelativeValue then
-		RelativeValue = Make("CFrameValue", {
-			Parent     = Part1;
+	if not relVal then
+		Make("CFrameValue", {
+			Parent     = part1;
 			Name       = "qRelativeCFrameWeldValue";
 			Archivable = true;
-			Value      = NewWeld.C1;
+			Value      = newWeld.C1;
 		})
 	end
-	return NewWeld
+	return newWeld
 end
 
-local function WeldParts(Parts, MainPart, JointType, DoNotUnanchor)
-	for _, Part in pairs(Parts) do
-		if ShouldBreakJoints(Part) then
-			Part:BreakJoints()
+local function WeldParts(parts, mainPart, doNotUnanchor)
+	for _, part in ipairs(parts) do
+		if ShouldBreakJoints(part) then part:BreakJoints() end
+	end
+	for _, part in ipairs(parts) do
+		if part ~= mainPart and not part:FindFirstChild("NoPerfWeld") then
+			WeldTogether(mainPart, part)
 		end
 	end
-	for _, Part in pairs(Parts) do
-		if Part ~= MainPart and not Part:FindFirstChild("NoPerfWeld") then
-			WeldTogether(MainPart, Part, JointType, MainPart)
-		end
-	end
-	if not DoNotUnanchor then
-		for _, Part in pairs(Parts) do
-			Part.Anchored = false
-		end
-		MainPart.Anchored = false
+	if not doNotUnanchor then
+		for _, part in ipairs(parts) do part.Anchored = false end
+		mainPart.Anchored = false
 	end
 end
 
 local function PerfectionWeld()
-	local Tool = GetNearestParent(script, "Tool")
-	local Parts = GetBricks(script.Parent)
-	local PrimaryPart = Tool and Tool:FindFirstChild("Handle") and Tool.Handle:IsA("BasePart") and Tool.Handle
-		or script.Parent:IsA("Model") and script.Parent.PrimaryPart
-		or Parts[1]
-	if PrimaryPart then
-		WeldParts(Parts, PrimaryPart, "Weld", false)
+	local tool  = GetNearestParent(script, "Tool")
+	local parts = GetBricks(script.Parent)
+	local primary =
+		(tool and tool:FindFirstChild("Handle") and tool.Handle:IsA("BasePart") and tool.Handle)
+		or (script.Parent:IsA("Model") and script.Parent.PrimaryPart)
+		or parts[1]
+	if primary then
+		WeldParts(parts, primary, false)
 	else
 		warn("qWeld - Unable to weld part")
 	end
-	return Tool
+	return tool
 end
 
 local Tool = PerfectionWeld()
-
 if Tool and script.ClassName == "Script" then
-	script.Parent.AncestryChanged:connect(function()
-		PerfectionWeld()
-	end)
+	script.Parent.AncestryChanged:Connect(function() PerfectionWeld() end)
 end
 
 -- ============================================================
--- BLADE PITCH CONTROLLER (GESTION INDÉPENDANTE DES 3 PALES)
+-- BLADE PITCH CONTROLLER (3 pales indépendantes)
 -- ============================================================
-
-local RunService   = game:GetService("RunService")
-local SpeedConfig  = Hub.Parent.Parent["Speed config"]
-local pitchMotors  = {}
-local currentPitches = {90, 90, 90} -- 3 angles séparés
+local RunService  = game:GetService("RunService")
+local SpeedConfig = Hub.Parent.Parent["Speed config"]
 
 if not BladesFolder then return end
 
--- 🛑 INITIALISATION DES 3 VARIABLES DANS LE DOSSIER
+local currentPitches = {90, 90, 90}
+local pitchMotors    = {}
+
+-- Initialise les NumberValues dans SpeedConfig
 for i = 1, 3 do
-	local ba = SpeedConfig:FindFirstChild("BladeAngle" .. i)
-	if not ba then
-		ba = Instance.new("NumberValue")
-		ba.Name = "BladeAngle" .. i
-		ba.Value = 90
-		ba.Parent = SpeedConfig
+	if not SpeedConfig:FindFirstChild("BladeAngle" .. i) then
+		local v = Instance.new("NumberValue")
+		v.Name, v.Value, v.Parent = "BladeAngle" .. i, 90, SpeedConfig
 	end
 end
 
 local function linkBladeToPitch(index)
 	local pitchPart = BladesFolder:FindFirstChild("pitch" .. index)
-	local bladeModel = BladesFolder:FindFirstChild("blade" .. index)
+	local bladeModel = bladeModels[index]
+	if not (pitchPart and bladeModel and bladeModel:IsA("Model")) then return end
 
-	if pitchPart and bladeModel and bladeModel:IsA("Model") then
-		local mainBladePart = bladeModel.PrimaryPart or bladeModel:FindFirstChildWhichIsA("BasePart", true)
-		if not mainBladePart then return end
-		bladeModel.PrimaryPart = mainBladePart
+	local mainPart = bladeModel.PrimaryPart or bladeModel:FindFirstChildWhichIsA("BasePart", true)
+	if not mainPart then return end
+	bladeModel.PrimaryPart = mainPart
 
-		local bladeParts = {}
-		for _, p in ipairs(bladeModel:GetDescendants()) do
-			if p:IsA("BasePart") then
-				table.insert(bladeParts, p)
-				p:BreakJoints()
-			end
+	local bladeParts = {}
+	for _, p in ipairs(bladeModel:GetDescendants()) do
+		if p:IsA("BasePart") then
+			bladeParts[#bladeParts + 1] = p
+			p:BreakJoints()
 		end
-		WeldParts(bladeParts, mainBladePart, "Weld", true)
-
-		local motor = Instance.new("Motor6D")
-		motor.Name = "PitchMotor"
-		motor.Part0 = pitchPart
-		motor.Part1 = mainBladePart
-
-		local offset = pitchPart.CFrame:ToObjectSpace(mainBladePart.CFrame)
-		motor.C0 = CFrame.new()
-		motor.C1 = offset:Inverse()
-		motor.Parent = pitchPart
-
-		for _, p in ipairs(bladeParts) do
-			p.Anchored = false
-			p.CanCollide = false
-		end
-
-		pitchMotors[index] = motor
 	end
+	WeldParts(bladeParts, mainPart, true)
+
+	local motor = Instance.new("Motor6D")
+	motor.Name  = "PitchMotor"
+	motor.Part0 = pitchPart
+	motor.Part1 = mainPart
+	motor.C0    = CFrame.new()
+	motor.C1    = (pitchPart.CFrame:ToObjectSpace(mainPart.CFrame)):Inverse()
+	motor.Parent = pitchPart
+
+	for _, p in ipairs(bladeParts) do
+		p.Anchored   = false
+		p.CanCollide = false
+	end
+
+	pitchMotors[index] = motor
 end
 
 for i = 1, 3 do linkBladeToPitch(i) end
 
--- Boucle de rendu : Tourne chaque moteur indépendamment
+-- Boucle de rendu : applique la rotation de chaque pale
 RunService.Heartbeat:Connect(function()
 	for i = 1, 3 do
 		if pitchMotors[i] then
-			-- On applique la rotation individuelle
 			pitchMotors[i].C0 = CFrame.Angles(0, -math.rad(currentPitches[i]), 0)
 		end
 	end
 end)
 
--- Écoute les changements des 3 variables en temps réel
+-- Écoute les changements en temps réel
 for i = 1, 3 do
 	local ba = SpeedConfig:FindFirstChild("BladeAngle" .. i)
 	if ba then
 		currentPitches[i] = ba.Value
-		ba.Changed:Connect(function(newAngle)
-			currentPitches[i] = newAngle
-		end)
+		ba.Changed:Connect(function(v) currentPitches[i] = v end)
 	end
 end

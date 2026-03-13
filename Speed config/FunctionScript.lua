@@ -1,105 +1,128 @@
 -- ============================================================
--- HYBRID CONTROLLER — POWER, RPM RÉEL & OVERSPEED PROTECTION
+-- HYBRID CONTROLLER — POWER, RPM & OVERSPEED 
 -- ============================================================
-local RunService = game:GetService("RunService")
+local RunService        = game:GetService("RunService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
--- 🟢 1. CHARGEMENT BIBLIOTHÈQUE 
-local PowerCurvesData = nil
-pcall(function() PowerCurvesData = require(ReplicatedStorage:WaitForChild("PowerCurvesLibrary", 5)) end)
+-- 1. COURBE DE PUISSANCE
+local PowerCurvesData
+pcall(function()
+	PowerCurvesData = require(ReplicatedStorage:WaitForChild("PowerCurvesLibrary", 5))
+end)
 
--- 🟢 RECHERCHE DU SOMMET DE L'ÉOLIENNE
+-- 2. RACINE DE L'ÉOLIENNE
 local TurbineRoot = script.Parent
 while TurbineRoot and TurbineRoot.Parent and TurbineRoot.Parent ~= workspace do
-	if TurbineRoot.Parent:IsA("Folder") then break end
-	if TurbineRoot:GetAttribute("IsTurbineRoot") then break end
+	if TurbineRoot.Parent:IsA("Folder") or TurbineRoot:GetAttribute("IsTurbineRoot") then break end
 	TurbineRoot = TurbineRoot.Parent
 end
 TurbineRoot:SetAttribute("IsWindTurbine", true)
 
--- Twist Cache
+-- Twist cache
 local BladesFunc = script.Parent.Parent
-local CF = BladesFunc and BladesFunc:FindFirstChild("CF")
+local CF    = BladesFunc and BladesFunc:FindFirstChild("CF")
 local Twist = CF and CF:FindFirstChild("Twist")
 if Twist then Twist.BottomParamA = 0; Twist.BottomParamB = 0 end
 
--- 🟢 2. IDENTIFICATION COURBE & LECTURE DES STATS
-local myCurve = nil
-local MAX_KW = 4500 
-local MAX_RPM = 17.5 
+-- 3. COURBE & STATS
+local myCurve  = nil
+local MAX_KW   = 4500
+local MAX_RPM  = 17.5
 
-local turbineRealName = string.gsub(TurbineRoot.Name, " %(start new%)", "")
-turbineRealName = string.gsub(turbineRealName, " %d+$", "")
+local turbineName = TurbineRoot.Name
+	:gsub(" %(start new%)", "")
+	:gsub(" %d+$", "")
 
 if PowerCurvesData then
 	for modelName, curve in pairs(PowerCurvesData) do
-		if string.find(turbineRealName, modelName, 1, true) then
+		if turbineName:find(modelName, 1, true) then
 			myCurve = curve
 			TurbineRoot:SetAttribute("HasPowerCurve", true)
-
 			if curve.MaxRPM then MAX_RPM = curve.MaxRPM end
-
-			local finalPoint = curve[#curve]
-			if finalPoint then MAX_KW = finalPoint.p end
+			local last = curve[#curve]
+			if last then MAX_KW = last.p end
 			break
 		end
 	end
 end
 
--- 🟢 PIÈCES
-task.wait(1.5) 
-local yawUnion = TurbineRoot:FindFirstChild("YAW Union", true) or TurbineRoot:FindFirstChild("YAW", true)
-local nacelle = TurbineRoot:FindFirstChild("Nacelle", true)
-local kitBlades = TurbineRoot:FindFirstChild("Wind Turbine KIT BLADES", true) 
-	or TurbineRoot:FindFirstChild("Rotor", true) 
+-- 4. PIÈCES (avec délai d'initialisation)
+task.wait(1.5)
+local yawUnion   = TurbineRoot:FindFirstChild("YAW Union", true) or TurbineRoot:FindFirstChild("YAW", true)
+local nacelle    = TurbineRoot:FindFirstChild("Nacelle", true)
+local kitBlades  = TurbineRoot:FindFirstChild("Wind Turbine KIT BLADES", true)
+	or TurbineRoot:FindFirstChild("Rotor", true)
 	or TurbineRoot:FindFirstChild("Blades", true)
-
 local statusLight = TurbineRoot:FindFirstChild("StatusLight", true)
-local rotorHinge = TurbineRoot:FindFirstChild("HingeConstraint", true) or TurbineRoot:FindFirstChild("RotorHinge", true) 
-local rotorMotor = TurbineRoot:FindFirstChild("RotorMotor", true)
+local rotorHinge  = TurbineRoot:FindFirstChild("HingeConstraint", true) or TurbineRoot:FindFirstChild("RotorHinge", true)
+local rotorMotor  = TurbineRoot:FindFirstChild("RotorMotor", true)
 
-local function getOrCreateValue(name, typeClass, default)
-	local val = TurbineRoot:FindFirstChild(name) or Instance.new(typeClass)
-	if not val.Parent then val.Name = name val.Value = default val.Parent = TurbineRoot end
-	return val
+-- Utilitaire : récupère ou crée une Value
+local function getOrCreate(name, typeClass, default)
+	local v = TurbineRoot:FindFirstChild(name)
+	if not v then
+		v = Instance.new(typeClass)
+		v.Name, v.Value, v.Parent = name, default, TurbineRoot
+	end
+	return v
 end
 
-local isOnValue = getOrCreateValue("IsOn", "BoolValue", true)
-local stateValue = getOrCreateValue("CurrentState", "StringValue", "STOPPED")
-local timerValue = getOrCreateValue("StormTimer", "IntValue", 0)
-local isManualPitchVal = getOrCreateValue("IsManualPitch", "BoolValue", false)
+local isOnValue       = getOrCreate("IsOn",         "BoolValue",   true)
+local stateValue      = getOrCreate("CurrentState", "StringValue", "STOPPED")
+local timerValue      = getOrCreate("StormTimer",   "IntValue",    0)
+local isManualPitchVal= getOrCreate("IsManualPitch","BoolValue",   false)
 
 local manualPitches = {
-	getOrCreateValue("ManualPitch1", "NumberValue", 91.7),
-	getOrCreateValue("ManualPitch2", "NumberValue", 91.7),
-	getOrCreateValue("ManualPitch3", "NumberValue", 91.7)
+	getOrCreate("ManualPitch1", "NumberValue", 91.7),
+	getOrCreate("ManualPitch2", "NumberValue", 91.7),
+	getOrCreate("ManualPitch3", "NumberValue", 91.7),
 }
 
 local bladeAngleVals = {
 	script.Parent:FindFirstChild("BladeAngle1") or TurbineRoot:FindFirstChild("BladeAngle1", true),
 	script.Parent:FindFirstChild("BladeAngle2") or TurbineRoot:FindFirstChild("BladeAngle2", true),
-	script.Parent:FindFirstChild("BladeAngle3") or TurbineRoot:FindFirstChild("BladeAngle3", true)
+	script.Parent:FindFirstChild("BladeAngle3") or TurbineRoot:FindFirstChild("BladeAngle3", true),
 }
 
--- Paramètres de Pitch
-local INITIAL_PITCH, IDLE_PITCH = 91.7, 70 
-local WIND_CUT_IN, WIND_RATED, WIND_CUT_OUT = 3.0, 13.0, 25.0 
-local PITCH_SPEED_START, PITCH_SPEED_REGULATE, PITCH_SPEED_STORM, PITCH_SPEED_STOP = 1.0, 2.5, 4.0, 3.0
-local PITCH_SPEED_EMERGENCY = 8.0 
+-- 5. CONSTANTES
+local INIT_PITCH        = 91.7
+local IDLE_PITCH        = 70
+local WIND_CUT_IN       = 3.0
+local WIND_RATED        = 13.0
+local WIND_CUT_OUT      = 25.0
+local PS_START          = 1.0
+local PS_REGULATE       = 2.5
+local PS_STORM          = 4.0
+local PS_STOP           = 3.0
+local PS_EMERGENCY      = 8.0
+local RPM_MIN_RATIO     = 0.35   -- ratio min de MAX_RPM au démarrage
+local OVERSPEED_RATIO   = 1.15   -- seuil déclenchement overspeed
+local LOGIC_TICK        = 0.1    -- intervalle cerveau (s)
+local YAW_SPEED         = 2.0
 
-local turbineState = "STOPPED"
-local currentPitches = {INITIAL_PITCH, INITIAL_PITCH, INITIAL_PITCH}
-local pitchTargets = {INITIAL_PITCH, INITIAL_PITCH, INITIAL_PITCH}
-local pitchSpeed = PITCH_SPEED_STOP
-local displayPower, displayRpm, cooldownTimer = 0, 0, 0
-local startupPhase, startupDelayTimer = 0, 0
+-- 6. ÉTAT
+local turbineState    = "STOPPED"
+local currentPitches  = {INIT_PITCH, INIT_PITCH, INIT_PITCH}
+local pitchTargets    = {INIT_PITCH, INIT_PITCH, INIT_PITCH}
+local pitchSpeed      = PS_STOP
+local displayPower    = 0
+local displayRpm      = 0
+local cooldownTimer   = 0
+local startupPhase    = 0
+local startupDelay    = 0
+local logicTimer      = 0
+local safeStartTimer  = 0
 
-local YAW_SPEED = 2.0
-local currentYawAngle = 0
-local yawInitialCFrame = yawUnion and yawUnion.CFrame or CFrame.new()
+-- 7. YAW
+local currentYawAngle   = 0
+local yawInitialCFrame  = yawUnion and yawUnion.CFrame or CFrame.new()
+local nacelleOffset     = CFrame.new()
+local rotorRelativeOffset = CFrame.new()
+local rotorBasePart     = nil
 
-local nacelleOffset, rotorRelativeOffset = CFrame.new(), CFrame.new()
-local rotorBasePart = nil
+local localYawSpeed = YAW_SPEED + Random.new(
+	yawUnion and math.floor(yawUnion.Position.X) or 1
+):NextNumber(-0.5, 0.5)
 
 local function getSafeCFrame(obj)
 	if not obj then return CFrame.new() end
@@ -110,244 +133,293 @@ end
 
 if yawUnion then
 	if nacelle then
-		local mainPart = nacelle:FindFirstChildWhichIsA("BasePart")
-		nacelleOffset = yawInitialCFrame:ToObjectSpace(getSafeCFrame(mainPart or nacelle))
+		local mp = nacelle:FindFirstChildWhichIsA("BasePart")
+		nacelleOffset = yawInitialCFrame:ToObjectSpace(getSafeCFrame(mp or nacelle))
 	end
 	if kitBlades then
-		rotorBasePart = kitBlades.PrimaryPart or kitBlades:FindFirstChild("Hub", true) or kitBlades:FindFirstChildWhichIsA("BasePart", true) or kitBlades
-		if rotorBasePart then 
-			rotorRelativeOffset = yawInitialCFrame:ToObjectSpace(getSafeCFrame(rotorBasePart)) 
+		rotorBasePart = kitBlades.PrimaryPart
+			or kitBlades:FindFirstChild("Hub", true)
+			or kitBlades:FindFirstChildWhichIsA("BasePart", true)
+			or kitBlades
+		if rotorBasePart then
+			rotorRelativeOffset = yawInitialCFrame:ToObjectSpace(getSafeCFrame(rotorBasePart))
 		end
 	end
 end
 
-local localYawSpeed = YAW_SPEED + Random.new(yawUnion and math.floor(yawUnion.Position.X) or 1):NextNumber(-0.5, 0.5)
+-- 8. SOURCES VENT
 local globalWindCtrl = workspace:FindFirstChild("GlobalWindController")
 local wSpeedVal = globalWindCtrl and globalWindCtrl:FindFirstChild("WindSpeed")
 local wAngleVal = globalWindCtrl and globalWindCtrl:FindFirstChild("WindAngle")
 
-local logicTimer = 0
-local LOGIC_TICK_RATE = 0.1
-local safeStartTimer = 0
+-- Helper : interpolation linéaire sur la courbe de puissance
+local function interpolatePower(wSpeed)
+	if not myCurve then
+		local r = math.clamp((wSpeed - WIND_CUT_IN) / (WIND_RATED - WIND_CUT_IN), 0, 1)
+		return MAX_KW * r * r * (3 - 2 * r)
+	end
+	if wSpeed > myCurve[#myCurve].w then return MAX_KW end
+	for j = 1, #myCurve - 1 do
+		local a, b = myCurve[j], myCurve[j + 1]
+		if wSpeed >= a.w and wSpeed <= b.w then
+			return a.p + (b.p - a.p) * ((wSpeed - a.w) / (b.w - a.w))
+		end
+	end
+	return 0
+end
 
--- 🟢 BOUCLE PRINCIPALE
+-- Helper : couleur du voyant selon l'état
+local STATUS_COLORS = {
+	RUNNING      = Color3.fromRGB(0, 255, 0),
+	STARTING     = Color3.fromRGB(255, 170, 0),
+	LACK_OF_WIND = Color3.fromRGB(200, 200, 200),
+	COOLDOWN     = Color3.fromRGB(255, 255, 0),
+	STOPPED      = Color3.fromRGB(255, 0, 0),
+}
+
+local function updateStatusLight(state)
+	if not statusLight then return end
+	statusLight.Material = Enum.Material.Neon
+	if state == "OVERSPEED" then
+		statusLight.Color = math.floor(tick() * 8) % 2 == 0
+			and Color3.fromRGB(255, 0, 0) or Color3.fromRGB(255, 255, 255)
+	elseif state == "STORM" then
+		statusLight.Color = math.floor(tick() * 4) % 2 == 0
+			and Color3.fromRGB(255, 0, 0) or Color3.fromRGB(50, 0, 0)
+	else
+		statusLight.Color = STATUS_COLORS[state] or Color3.fromRGB(255, 0, 0)
+	end
+end
+
+-- ============================================================
+-- BOUCLE PRINCIPALE
+-- ============================================================
 RunService.Heartbeat:Connect(function(dt)
-	safeStartTimer = safeStartTimer + dt
-	logicTimer = logicTimer + dt
+	safeStartTimer += dt
+	logicTimer      += dt
 
+	-- Lecture vent
 	local wSpeed, wAngle = 0, 0
 	if globalWindCtrl then
 		wSpeed = wSpeedVal and wSpeedVal.Value or 0
 		wAngle = wAngleVal and wAngleVal.Value or 0
 	else
-		local wDir = workspace.GlobalWind
-		wSpeed = wDir.Magnitude
-		wAngle = math.deg(math.atan2(wDir.X, wDir.Z))
+		local dir = workspace.GlobalWind
+		wSpeed = dir.Magnitude
+		wAngle = math.deg(math.atan2(dir.X, dir.Z))
 	end
 
-	local isEnabled = isOnValue.Value 
-	local avgPitch = (currentPitches[1] + currentPitches[2] + currentPitches[3]) * 0.333
+	local isEnabled = isOnValue.Value
+	local avgPitch  = (currentPitches[1] + currentPitches[2] + currentPitches[3]) / 3
 
-	-- 👁️ YAW FLUIDE
+	-- ── YAW ──────────────────────────────────────────────────
 	if yawUnion and nacelle and wSpeed >= 2 then
-		local diff = (wAngle - currentYawAngle) % 360
-		if diff > 180 then diff = diff - 360 elseif diff < -180 then diff = diff + 360 end
-
-		if math.abs(diff) > 2.0 then 
+		local diff = ((wAngle - currentYawAngle) % 360)
+		if diff > 180 then diff -= 360 end
+		if math.abs(diff) > 2.0 then
 			local step = math.sign(diff) * localYawSpeed * dt
-			currentYawAngle = (currentYawAngle + (math.abs(step) > math.abs(diff) and diff or step)) % 360
+			if math.abs(step) > math.abs(diff) then step = diff end
+			currentYawAngle = (currentYawAngle + step) % 360
 
-			local newYawCFrame = CFrame.new(yawInitialCFrame.Position) * CFrame.Angles(0, math.rad(currentYawAngle), 0)
-			yawUnion.CFrame = newYawCFrame
-			nacelle:PivotTo(newYawCFrame * nacelleOffset) 
+			local newYaw = CFrame.new(yawInitialCFrame.Position) * CFrame.Angles(0, math.rad(currentYawAngle), 0)
+			yawUnion.CFrame = newYaw
+			nacelle:PivotTo(newYaw * nacelleOffset)
 
 			if rotorBasePart and safeStartTimer > 1.5 then
-				local currentRotorCFrame = getSafeCFrame(rotorBasePart)
-				local currentRotorOrientation = currentRotorCFrame - currentRotorCFrame.Position
-				local targetPosition = (newYawCFrame * rotorRelativeOffset).Position
-				local newRotorCFrame = CFrame.new(targetPosition) * currentRotorOrientation
-				if rotorBasePart:IsA("Model") then rotorBasePart:PivotTo(newRotorCFrame) else rotorBasePart.CFrame = newRotorCFrame end
+				local cf = getSafeCFrame(rotorBasePart)
+				local orient = cf - cf.Position
+				local pos = (newYaw * rotorRelativeOffset).Position
+				local newCF = CFrame.new(pos) * orient
+				if rotorBasePart:IsA("Model") then rotorBasePart:PivotTo(newCF)
+				else rotorBasePart.CFrame = newCF end
 			end
 		end
 	end
 
-	-- 🧠 CERVEAU (États & Production)
-	if logicTimer >= LOGIC_TICK_RATE then
-		local logicDt = logicTimer
-		logicTimer = 0 
+	-- ── CERVEAU (logique à taux réduit) ──────────────────────
+	if logicTimer >= LOGIC_TICK then
+		local ldt = logicTimer
+		logicTimer = 0
 
-		local pitchDiffMax = math.max(math.abs(currentPitches[1] - currentPitches[2]), math.abs(currentPitches[2] - currentPitches[3]), math.abs(currentPitches[1] - currentPitches[3]))
+		local pitchMax = math.max(
+			math.abs(currentPitches[1] - currentPitches[2]),
+			math.abs(currentPitches[2] - currentPitches[3]),
+			math.abs(currentPitches[1] - currentPitches[3])
+		)
 
-		-- 🚨 OVERSPEED DETECTION 
-		if displayRpm > (MAX_RPM * 1.15) and turbineState == "RUNNING" then
-			turbineState = "OVERSPEED"
-			cooldownTimer = 30 
+		-- Détection overspeed
+		if displayRpm > MAX_RPM * OVERSPEED_RATIO and turbineState == "RUNNING" then
+			turbineState = "OVERSPEED"; cooldownTimer = 30
 		end
 
+		-- Machine à états
 		if turbineState == "STOPPED" then
 			if isEnabled then
 				isManualPitchVal.Value = false
-				if wSpeed >= WIND_CUT_IN and wSpeed < WIND_CUT_OUT then turbineState = "STARTING" startupPhase = 0
-				elseif wSpeed < WIND_CUT_IN and wSpeed > 0.5 then turbineState = "LACK_OF_WIND" end
+				if wSpeed >= WIND_CUT_IN and wSpeed < WIND_CUT_OUT then
+					turbineState = "STARTING"; startupPhase = 0
+				elseif wSpeed < WIND_CUT_IN and wSpeed > 0.5 then
+					turbineState = "LACK_OF_WIND"
+				end
 			end
+
 		elseif turbineState == "LACK_OF_WIND" then
 			if not isEnabled then turbineState = "STOPPED"
-			elseif wSpeed >= WIND_CUT_IN and wSpeed < WIND_CUT_OUT then turbineState = "STARTING" startupPhase = 0
-			elseif wSpeed > WIND_CUT_OUT then turbineState = "STORM" cooldownTimer = 30 end
+			elseif wSpeed >= WIND_CUT_IN and wSpeed < WIND_CUT_OUT then turbineState = "STARTING"; startupPhase = 0
+			elseif wSpeed > WIND_CUT_OUT then turbineState = "STORM"; cooldownTimer = 30 end
+
 		elseif turbineState == "STARTING" then
-			if wSpeed > WIND_CUT_OUT then turbineState = "STORM" cooldownTimer = 30
-			elseif not isEnabled then turbineState = "STOPPED"
+			if not isEnabled then turbineState = "STOPPED"
+			elseif wSpeed > WIND_CUT_OUT then turbineState = "STORM"; cooldownTimer = 30
 			elseif wSpeed < WIND_CUT_IN then turbineState = "LACK_OF_WIND"
 			elseif startupPhase == 5 and avgPitch <= 1.0 then turbineState = "RUNNING" end
+
 		elseif turbineState == "RUNNING" then
 			if not isEnabled then turbineState = "STOPPED"
-			elseif wSpeed > WIND_CUT_OUT then turbineState = "STORM" cooldownTimer = 30
-			elseif wSpeed < WIND_CUT_IN then turbineState = "LACK_OF_WIND" end 
+			elseif wSpeed > WIND_CUT_OUT then turbineState = "STORM"; cooldownTimer = 30
+			elseif wSpeed < WIND_CUT_IN then turbineState = "LACK_OF_WIND" end
+
 		elseif turbineState == "STORM" or turbineState == "OVERSPEED" then
-			cooldownTimer = math.max(cooldownTimer - logicDt, 0)
+			cooldownTimer = math.max(cooldownTimer - ldt, 0)
 			if cooldownTimer <= 0 then turbineState = "COOLDOWN" end
-			if not isEnabled then turbineState = "STOPPED" end 
-		elseif turbineState == "COOLDOWN" then
-			if wSpeed < (WIND_CUT_OUT - 2) and isEnabled then
-				if wSpeed >= WIND_CUT_IN then turbineState = "STARTING" startupPhase = 0 else turbineState = "LACK_OF_WIND" end
-			end
 			if not isEnabled then turbineState = "STOPPED" end
+
+		elseif turbineState == "COOLDOWN" then
+			if not isEnabled then turbineState = "STOPPED"
+			elseif wSpeed < WIND_CUT_OUT - 2 then
+				turbineState = wSpeed >= WIND_CUT_IN and "STARTING" or "LACK_OF_WIND"
+				if turbineState == "STARTING" then startupPhase = 0 end
+			end
 		end
 
-		stateValue.Value = turbineState
-		timerValue.Value = math.ceil(cooldownTimer)
+		stateValue.Value  = turbineState
+		timerValue.Value  = math.ceil(cooldownTimer)
 
-		-- CIBLES PITCH
+		-- ── CIBLES PITCH ──────────────────────────────────────
+		local function setAllPitch(p, speed)
+			pitchTargets[1] = p; pitchTargets[2] = p; pitchTargets[3] = p
+			pitchSpeed = speed
+		end
+
 		if turbineState == "RUNNING" then
-			local regPitch = wSpeed >= WIND_RATED and (25 * math.clamp((wSpeed - WIND_RATED) / (WIND_CUT_OUT - WIND_RATED), 0, 1)) or 0
-			pitchTargets = {regPitch, regPitch, regPitch}
-			pitchSpeed = PITCH_SPEED_REGULATE 
+			local reg = wSpeed >= WIND_RATED
+				and (25 * math.clamp((wSpeed - WIND_RATED) / (WIND_CUT_OUT - WIND_RATED), 0, 1))
+				or 0
+			setAllPitch(reg, PS_REGULATE)
 
 		elseif turbineState == "STARTING" then
-			pitchSpeed = PITCH_SPEED_START 
+			pitchSpeed = PS_START
 			if startupPhase == 0 then
-				pitchTargets = {INITIAL_PITCH, INITIAL_PITCH, INITIAL_PITCH}
-				if pitchDiffMax < 0.5 and avgPitch >= (INITIAL_PITCH - 0.5) then startupPhase = 1 end
+				setAllPitch(INIT_PITCH, PS_START)
+				if pitchMax < 0.5 and avgPitch >= INIT_PITCH - 0.5 then startupPhase = 1 end
 			elseif startupPhase == 1 then
-				pitchTargets = {70, 70, 70}; if avgPitch <= 70.5 then startupPhase = 2; startupDelayTimer = 20 end
+				setAllPitch(70, PS_START); if avgPitch <= 70.5 then startupPhase = 2; startupDelay = 20 end
 			elseif startupPhase == 2 then
-				startupDelayTimer = startupDelayTimer - logicDt; if startupDelayTimer <= 0 then startupPhase = 3 end
+				startupDelay -= ldt; if startupDelay <= 0 then startupPhase = 3 end
 			elseif startupPhase == 3 then
-				pitchTargets = {20, 20, 20}; if avgPitch <= 20.5 then startupPhase = 4; startupDelayTimer = 15 end
+				setAllPitch(20, PS_START); if avgPitch <= 20.5 then startupPhase = 4; startupDelay = 15 end
 			elseif startupPhase == 4 then
-				startupDelayTimer = startupDelayTimer - logicDt; if startupDelayTimer <= 0 then startupPhase = 5 end
-			elseif startupPhase == 5 then pitchTargets = {0, 0, 0} end
+				startupDelay -= ldt; if startupDelay <= 0 then startupPhase = 5 end
+			elseif startupPhase == 5 then
+				setAllPitch(0, PS_START)
+			end
 
-		elseif turbineState == "LACK_OF_WIND" then pitchTargets = {IDLE_PITCH, IDLE_PITCH, IDLE_PITCH}; pitchSpeed = PITCH_SPEED_STOP
-		elseif turbineState == "STORM" then pitchTargets = {INITIAL_PITCH, INITIAL_PITCH, INITIAL_PITCH}; pitchSpeed = PITCH_SPEED_STORM
-		elseif turbineState == "OVERSPEED" then
-			pitchTargets = {INITIAL_PITCH, INITIAL_PITCH, INITIAL_PITCH}
-			pitchSpeed = PITCH_SPEED_EMERGENCY 
+		elseif turbineState == "LACK_OF_WIND" then setAllPitch(IDLE_PITCH, PS_STOP)
+		elseif turbineState == "STORM"         then setAllPitch(INIT_PITCH, PS_STORM)
+		elseif turbineState == "OVERSPEED"     then setAllPitch(INIT_PITCH, PS_EMERGENCY)
 		elseif turbineState == "STOPPED" or turbineState == "COOLDOWN" then
-			if isManualPitchVal.Value then pitchTargets = {manualPitches[1].Value, manualPitches[2].Value, manualPitches[3].Value}
-			else pitchTargets = {INITIAL_PITCH, INITIAL_PITCH, INITIAL_PITCH}; pitchSpeed = PITCH_SPEED_STOP end
+			if isManualPitchVal.Value then
+				pitchTargets[1] = manualPitches[1].Value
+				pitchTargets[2] = manualPitches[2].Value
+				pitchTargets[3] = manualPitches[3].Value
+			else
+				setAllPitch(INIT_PITCH, PS_STOP)
+			end
 		end
 
-		-- PRODUCTION
+		-- ── PRODUCTION ────────────────────────────────────────
 		local targetPower = 0
 		if (turbineState == "RUNNING" or turbineState == "STARTING") and avgPitch <= 20.0 then
-			if myCurve then
-				for j = 1, #myCurve - 1 do
-					if wSpeed >= myCurve[j].w and wSpeed <= myCurve[j+1].w then
-						targetPower = myCurve[j].p + (myCurve[j+1].p - myCurve[j].p) * ((wSpeed - myCurve[j].w) / (myCurve[j+1].w - myCurve[j].w)); break
-					elseif wSpeed > myCurve[#myCurve].w then targetPower = MAX_KW end
-				end
-			else
-				targetPower = wSpeed >= WIND_RATED and MAX_KW or (MAX_KW * math.clamp((wSpeed - WIND_CUT_IN) / (WIND_RATED - WIND_CUT_IN), 0, 1)^2 * (3 - 2 * math.clamp((wSpeed - WIND_CUT_IN) / (WIND_RATED - WIND_CUT_IN), 0, 1)))
-			end
-			targetPower = targetPower * Random.new():NextNumber(0.99, 1.01)
+			targetPower = interpolatePower(wSpeed)
+			targetPower *= Random.new():NextNumber(0.99, 1.01)
 		end
-		displayPower = math.clamp(displayPower + math.sign(targetPower - displayPower) * (MAX_KW / 20) * logicDt, 0, targetPower >= displayPower and targetPower or displayPower)
+		local powerStep = MAX_KW / 20 * ldt
+		if targetPower > displayPower then
+			displayPower = math.min(displayPower + powerStep, targetPower)
+		elseif targetPower < displayPower then
+			displayPower = math.max(displayPower - powerStep, targetPower)
+		end
 		if displayPower < 2 then displayPower = 0 end
 
-		TurbineRoot:SetAttribute("CurrentYaw", currentYawAngle)
+		-- ── ATTRIBUTS (batch) ─────────────────────────────────
+		TurbineRoot:SetAttribute("CurrentYaw",   currentYawAngle)
 		TurbineRoot:SetAttribute("RealWindSpeed", wSpeed * 3.6)
-		TurbineRoot:SetAttribute("CurrentRPM", displayRpm)
+		TurbineRoot:SetAttribute("CurrentRPM",   displayRpm)
 		TurbineRoot:SetAttribute("CurrentPower", displayPower)
-		TurbineRoot:SetAttribute("MaxPowerVal", MAX_KW) 
-		TurbineRoot:SetAttribute("MaxRPMVal", MAX_RPM)
+		TurbineRoot:SetAttribute("MaxPowerVal",  MAX_KW)
+		TurbineRoot:SetAttribute("MaxRPMVal",    MAX_RPM)
 
-		if statusLight then
-			statusLight.Material = Enum.Material.Neon
-			if turbineState == "RUNNING" then statusLight.Color = Color3.fromRGB(0, 255, 0)
-			elseif turbineState == "STARTING" then statusLight.Color = Color3.fromRGB(255, 170, 0)
-			elseif turbineState == "LACK_OF_WIND" then statusLight.Color = Color3.fromRGB(200, 200, 200)
-			elseif turbineState == "OVERSPEED" then statusLight.Color = math.floor(tick() * 8) % 2 == 0 and Color3.fromRGB(255, 0, 0) or Color3.fromRGB(255, 255, 255) 
-			elseif turbineState == "STORM" then statusLight.Color = math.floor(tick() * 4) % 2 == 0 and Color3.fromRGB(255, 0, 0) or Color3.fromRGB(50, 0, 0)
-			elseif turbineState == "COOLDOWN" then statusLight.Color = Color3.fromRGB(255, 255, 0)
-			elseif turbineState == "STOPPED" then statusLight.Color = Color3.fromRGB(255, 0, 0) end
-		end
+		updateStatusLight(turbineState)
 	end
 
-	-- 👁️ ANIMATION PITCH 
+	-- ── ANIMATION PITCH (chaque frame) ───────────────────────
+	local pitchStep = pitchSpeed * dt
 	for i = 1, 3 do
-		if math.abs(currentPitches[i] - pitchTargets[i]) < (pitchSpeed * dt) then currentPitches[i] = pitchTargets[i]
-		else currentPitches[i] = currentPitches[i] + math.sign(pitchTargets[i] - currentPitches[i]) * pitchSpeed * dt end
+		local diff = pitchTargets[i] - currentPitches[i]
+		currentPitches[i] = math.abs(diff) < pitchStep
+			and pitchTargets[i]
+			or currentPitches[i] + math.sign(diff) * pitchStep
 		if bladeAngleVals[i] then bladeAngleVals[i].Value = currentPitches[i] end
 	end
 
-	-- ⚙️ CALCUL DU RPM (CORRIGÉ POUR TRANSITION FLUIDE)
-	local targetLogicalRpm = 0
+	-- ── CALCUL RPM ───────────────────────────────────────────
+	-- RPM idéal selon le vent
+	local windRatio = math.clamp((wSpeed - WIND_CUT_IN) / (WIND_RATED - WIND_CUT_IN), 0.1, 1)
+	local idealRpm  = MAX_RPM * RPM_MIN_RATIO + (MAX_RPM * (1 - RPM_MIN_RATIO)) * windRatio
 
-	-- 1. On calcule d'abord la vitesse idéale "Cible" par rapport à la puissance du vent actuel
-	local idealRpm = 0
-	if wSpeed >= WIND_RATED then 
-		idealRpm = MAX_RPM
-	else
-		local windRatio = math.clamp((wSpeed - WIND_CUT_IN) / (WIND_RATED - WIND_CUT_IN), 0.1, 1)
-		local minStartRPM = MAX_RPM * 0.35 
-		idealRpm = minStartRPM + ((MAX_RPM - minStartRPM) * windRatio)
-	end
-
-	-- 2. On applique cette cible selon l'état
+	local targetRpm = 0
 	if turbineState == "RUNNING" then
-		targetLogicalRpm = idealRpm
-		
+		targetRpm = idealRpm
 	elseif turbineState == "STARTING" and startupPhase >= 3 then
-		-- Au démarrage, on cible progressivement la vitesse idéale (et plus obligatoirement la vitesse MAX aveuglément)
-		local pitchEffect = math.clamp(1 - (avgPitch / 91.7), 0, 1) 
-		targetLogicalRpm = idealRpm * pitchEffect
-
-	elseif turbineState == "LACK_OF_WIND" then 
-		targetLogicalRpm = math.clamp(wSpeed, 0, 3) 
-		
-	else 
-		targetLogicalRpm = wSpeed >= 3.0 and math.clamp(wSpeed * 0.2, 0.5, 2.5) or 0 
-	end
-
-	-- Frein mécanique (seulement si on ne démarre pas et on ne tourne pas)
-	if avgPitch > 45 and turbineState ~= "RUNNING" and turbineState ~= "STARTING" and turbineState ~= "STOPPED" and turbineState ~= "STORM" and turbineState ~= "OVERSPEED" then 
-		targetLogicalRpm = targetLogicalRpm * math.clamp(1 - ((avgPitch - 45) / 46.7), 0, 1) 
-	end
-
-	if turbineState == "OVERSPEED" then
-		targetLogicalRpm = 0
-		displayRpm = displayRpm - (displayRpm * dt * 0.8) 
-	elseif turbineState == "STORM" or turbineState == "STOPPED" then
-		targetLogicalRpm = 0
-		displayRpm = displayRpm - (displayRpm * dt * 0.4) 
+		targetRpm = idealRpm * math.clamp(1 - (avgPitch / INIT_PITCH), 0, 1)
+	elseif turbineState == "LACK_OF_WIND" then
+		targetRpm = math.clamp(wSpeed, 0, 3)
 	else
-		displayRpm = displayRpm + (targetLogicalRpm - displayRpm) * (dt * 0.15)
+		targetRpm = wSpeed >= 3.0 and math.clamp(wSpeed * 0.2, 0.5, 2.5) or 0
 	end
 
-	-- ⚙️ VISUEL (Twist / Physique)
+	-- Frein mécanique si pale fermée et hors rotation active
+	if avgPitch > 45
+		and turbineState ~= "RUNNING" and turbineState ~= "STARTING"
+		and turbineState ~= "STOPPED" and turbineState ~= "STORM"
+		and turbineState ~= "OVERSPEED"
+	then
+		targetRpm *= math.clamp(1 - (avgPitch - 45) / 46.7, 0, 1)
+	end
+
+	-- Décélération selon l'état
+	if turbineState == "OVERSPEED" then
+		displayRpm = math.max(displayRpm - displayRpm * dt * 0.8, 0)
+	elseif turbineState == "STORM" or turbineState == "STOPPED" then
+		targetRpm  = 0
+		displayRpm = math.max(displayRpm - displayRpm * dt * 0.4, 0)
+	else
+		displayRpm += (targetRpm - displayRpm) * dt * 0.15
+	end
+
+	-- ── VISUEL ROTOR ─────────────────────────────────────────
 	if Twist then
-		local rpmPercentage = displayRpm / MAX_RPM
-		local calcSpeed = -(rpmPercentage * 45.0) 
-		Twist.BottomParamA = calcSpeed
-		Twist.BottomParamB = calcSpeed
-		
+		local s = -(displayRpm / MAX_RPM) * 45.0
+		Twist.BottomParamA = s; Twist.BottomParamB = s
+
 	elseif rotorHinge and rotorHinge:IsA("HingeConstraint") then
-		rotorHinge.ActuatorType = Enum.ActuatorType.Motor
+		rotorHinge.ActuatorType   = Enum.ActuatorType.Motor
 		rotorHinge.AngularVelocity = displayRpm * 0.10472
+
 	elseif rotorMotor and (rotorMotor:IsA("Motor6D") or rotorMotor:IsA("Weld")) then
 		rotorMotor.C0 = rotorMotor.C0 * CFrame.Angles(0, 0, math.rad(displayRpm * dt * 6))
-	elseif kitBlades and not Twist then
+
+	elseif kitBlades then
 		kitBlades:PivotTo(kitBlades:GetPivot() * CFrame.Angles(0, 0, math.rad(displayRpm * dt * 6)))
 	end
 end)
